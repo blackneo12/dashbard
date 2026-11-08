@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>피자 매장 인사이트</title>
+<meta name="description" content="피자 매장 9곳, 6년 실적 데이터에서 찾은 시사점 3가지 — 30초 키네틱 타이포그래피 영상">
+<style>
+  :root { --bg:#ffffff; --ink:#1e1e1e; --muted:#6b6b6b; --line:#ececec; --y:#ffe25c; --p:#ffb2c4; --b:#a0d6f6; --o:#ffa84c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#141414; --ink:#f1f1f1; --muted:#a3a3a3; --line:#2a2a2a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font-family: "Malgun Gothic","Apple SD Gothic Neo","Noto Sans KR",system-ui,sans-serif; line-height:1.6; }
+  main { max-width: 1040px; margin: 0 auto; padding: 40px 16px 64px; }
+  .eyebrow { color:var(--muted); font-size:14px; margin:0 0 6px; }
+  h1 { font-size: clamp(26px, 4.5vw, 40px); margin:0 0 24px; letter-spacing:-0.02em; }
+  video { width:100%; aspect-ratio:16/9; border-radius:12px; background:#000; display:block;
+          box-shadow: 0 10px 30px rgba(0,0,0,.12); }
+  .notes { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:16px; margin:32px 0; }
+  .note { color:#1e1e1e; padding:20px 20px 22px; border-radius:4px; box-shadow: 0 6px 14px rgba(0,0,0,.10); }
+  .note:nth-child(1){ background:var(--y); transform:rotate(-1deg); }
+  .note:nth-child(2){ background:var(--p); transform:rotate(.8deg); }
+  .note:nth-child(3){ background:var(--b); transform:rotate(-.6deg); }
+  .note b { display:block; font-size:20px; margin:4px 0 6px; }
+  .note small { opacity:.7; font-weight:700; }
+  .note p { margin:0; font-size:15px; }
+  .conclusion { background:var(--o); color:#3a2000; font-weight:700; font-size:clamp(18px,3vw,24px);
+                padding:16px 20px; border-radius:4px; transform:rotate(-.6deg); display:inline-block; }
+  footer { margin-top:40px; padding-top:16px; border-top:1px solid var(--line); color:var(--muted); font-size:13px; }
+  a { color:inherit; }
+</style>
+</head>
+<body>
+<main>
+  <p class="eyebrow">피자 프랜차이즈 9개 매장 · 2020–2026 실적 · 탐색적 데이터 분석</p>
+  <h1>피자 매장 6년 데이터, 핵심은 딱 3가지</h1>
+
+  <video controls playsinline preload="metadata" src="pizza-insights-30s.mp4"></video>
+
+  <section class="notes">
+    <div class="note"><small>01</small><b>손님이 멈췄다</b>
+      <p>2022→2025년 주문은 1.4% 줄었고, 주문당 매출(단가)만 19% 올랐습니다.</p></div>
+    <div class="note"><small>02</small><b>이익을 깎은 건 인건비</b>
+      <p>이익률 하락 1.2%p는 인건비율 상승 1.7%p로 거의 설명됩니다. 인당 인건비 +28%.</p></div>
+    <div class="note"><small>03</small><b>처방은 매장마다 다르다</b>
+      <p>강남·홍대는 임차료가, 충장로·연동은 식자재 원가 관리가 이익률을 깎습니다.</p></div>
+  </section>
+
+  <p class="conclusion">결론: 단가 말고, 손님을 늘려야 합니다.</p>
+
+  <footer>
+    가상 데이터 기반 실습 결과입니다. 영상은 Python 코드로만 만들었습니다
+    (<a href="https://github.com/blackneo12/dashbard/tree/main/motion">motion/render.py</a>).
+  </footer>
+</main>
+</body>
+</html>
