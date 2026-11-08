@@ -51,23 +51,23 @@ def read_wav(p):
     return x, sr
 
 VO = []
-for i in range(5):
+for i in range(6):
     x, sr = read_wav(os.path.join(ASSET, f'v{i}.wav'))
     idx = np.where(np.abs(x) > 500 / 32768)[0]
     VO.append(dict(x=x, sr=sr, s=idx[0] / sr, e=idx[-1] / sr))
 
 S = []
-_t = 0.9
+_t = 0.3
 for v in VO:
     S.append(float(_t))
-    _t += float(v['e'] - v['s']) + 0.55
+    _t += float(v['e'] - v['s']) + 0.42
 for i, v in enumerate(VO):
     v['start'] = S[i]
 
 # SAPI 단어 경계 이벤트(말하기 속도 보정 전 시간축)를 실제 음성 길이에 맞춰 선형 보정
 WD = {}
 _rows = [l.split('\t') for l in open(os.path.join(ASSET, 'words.tsv'), encoding='utf-8').read().splitlines() if l.strip()]
-for li in range(5):
+for li in range(6):
     lst = [(float(r[2]) / 1000, r[3]) for r in _rows if int(r[0]) == li]
     ev0 = lst[0][0]
     last_pos, last_txt = lst[-1]
@@ -111,9 +111,11 @@ def comp(dst, src, x, y, alpha=1.0):
 
 class Word:
     """한 단어(또는 글자)의 키네틱 등장. (x, y) = 왼쪽 기준선."""
-    def __init__(self, t0, text, x, y, size, color=INK, font=BOLD, style='pop', dur=0.45):
+    def __init__(self, t0, text, x, y, size, color=INK, font=BOLD, style='pop', dur=None, block=RED):
         self.t0, self.text, self.x, self.y = t0, text, x, y
-        self.size, self.color, self.font, self.style, self.dur = size, color, font, style, dur
+        self.size, self.color, self.font, self.style = size, color, font, style
+        self.dur = dur if dur is not None else {'block': 0.6, 'wipe': 0.4}.get(style, 0.45)
+        self.block = block
 
     @property
     def width(self):
@@ -130,6 +132,28 @@ class Word:
         ox, oy = self.x - pad, self.y - asc - pad
         if p >= 1:
             comp(L, im, ox, oy)
+            return
+        if self.style == 'wipe':          # 클리핑 마스크: 왼쪽부터 글자가 드러남
+            cw = int(im.width * eoc(p))
+            if cw > 0:
+                comp(L, im.crop((0, 0, cw, im.height)), ox, oy - (1 - eoc(p)) * self.size * 0.12)
+            return
+        if self.style == 'block':         # 색 블록이 덮었다가 걷히며 글자가 드러남
+            x0 = ox + pad * 0.6
+            x1 = ox + im.width - pad * 0.6
+            y0 = oy + pad + self.size * 0.12
+            y1 = oy + pad + asc + self.size * 0.05
+            bw = x1 - x0
+            if p < 0.5:
+                bx0, bx1 = x0, x0 + bw * eio(p / 0.5)
+            else:
+                q = eio((p - 0.5) / 0.5)
+                bx0, bx1 = x0 + bw * q, x1
+                cw = int(bx0 - ox)
+                if cw > 0:
+                    comp(L, im.crop((0, 0, min(cw, im.width), im.height)), ox, oy)
+            if bx1 > bx0:
+                ImageDraw.Draw(L).rectangle((bx0, y0, bx1, y1), fill=self.block)
             return
         sc, a, dx, dy, rot = 1.0, clamp(p * 3), 0.0, 0.0, 0.0
         if self.style == 'pop':
@@ -302,33 +326,97 @@ class Note:
     def land_time(self):
         return self.t0 + 0.30
 
+    def pose(self, t):
+        """(dx, dy, 배율, 추가 회전, 들림 0~1). 기본은 제자리."""
+        return 0.0, 0.0, 1.0, 0.0, 0.0
+
     def draw(self, world, t):
         p = prog(t, self.t0, 0.42)
         if p <= 0:
             return
         e = eoc(p)
-        sc = 1 + 0.34 * (1 - e)
+        pdx, pdy, psc, prot, plift = self.pose(t)
+        sc = (1 + 0.34 * (1 - e)) * psc
         if p > 0.6:
             sc *= 1 - 0.025 * math.sin(math.pi * (p - 0.6) / 0.4)
-        rot = self.rot + 10 * (1 - e)
+        rot = self.rot + 10 * (1 - e) + prot
         a = clamp(p * 5)
         im = self.base.copy()
         for it in self.items:
             it.draw(im, t)
         if sc != 1:
-            im = im.resize((int(self.w * sc), int(self.h * sc)), Image.BICUBIC)
+            im = im.resize((max(1, int(self.w * sc)), max(1, int(self.h * sc))), Image.BICUBIC)
         r = im.rotate(rot, resample=Image.BICUBIC, expand=True)
-        lift = 1 - e
+        lift = max(1 - e, plift)
         pad = 70
-        if p >= 1:
-            if self._shadow is None:
-                self._shadow = soft_shadow(r.getchannel('A'), 0.30, 11, pad)
-            sh = self._shadow
+        key = (round(sc, 4), round(rot, 3))
+        if p >= 1 and plift == 0:
+            if self._shadow is None or self._shadow[0] != key:
+                self._shadow = (key, soft_shadow(r.getchannel('A'), 0.30, 11, pad))
+            sh = self._shadow[1]
         else:
             sh = soft_shadow(r.getchannel('A'), 0.30 * a * (1 - 0.4 * lift), 11 + 26 * lift, pad)
-        ox, oy = self.cx - r.width / 2, self.cy - r.height / 2
+        ox, oy = self.cx + pdx - r.width / 2, self.cy + pdy - r.height / 2
         comp(world, sh, ox - pad + 7 + 18 * lift, oy - pad + 15 + 50 * lift)
         comp(world, r, ox, oy, a)
+
+
+def newsprint_surface(w, h):
+    """신문 스크랩: 누런 신문지 + 찢긴 가장자리 + 제호와 본문 줄."""
+    base = np.array([240, 236, 224], np.float32)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    shade = 1 - 0.035 * (yy / h) - 0.02 * (xx / w)
+    noise = _rng.normal(0, 3.0, (h, w)).astype(np.float32)
+    rgb = np.clip(base[None, None] * shade[..., None] + noise[..., None], 0, 255).astype(np.uint8)
+    im = Image.fromarray(np.concatenate([rgb, np.full((h, w, 1), 255, np.uint8)], 2), 'RGBA')
+    # 찢긴 가장자리 (가위로 오린 듯 불규칙)
+    r = np.random.default_rng(11)
+    pts = []
+    for x in range(0, w, 14):
+        pts.append((x, r.uniform(0, 9)))
+    for y in range(0, h, 14):
+        pts.append((w - r.uniform(0, 9), y))
+    for x in range(w, 0, -14):
+        pts.append((x, h - r.uniform(0, 9)))
+    for y in range(h, 0, -14):
+        pts.append((r.uniform(0, 9), y))
+    mask = Image.new('L', (w, h), 0)
+    ImageDraw.Draw(mask).polygon(pts, fill=255)
+    im.putalpha(mask)
+    d = ImageDraw.Draw(im)
+    f1, f2 = F(BOLD, 46), F(REG, 30)
+    d.text((70, 95), '피자 데일리', font=f1, fill=INK, anchor='ls')
+    sub = '2022 → 2025 연간 실적 결산'
+    d.text((w - 70 - f2.getlength(sub), 92), sub, font=f2, fill=(110, 110, 110, 255), anchor='ls')
+    d.rectangle((70, 118, w - 70, 122), fill=INK)
+    d.rectangle((70, 128, w - 70, 129), fill=INK)
+    rb = np.random.default_rng(5)
+    for row, y in enumerate((598, 628, 658)):
+        for c0, c1 in ((70, 560), (640, w - 70)):
+            end = c1 if row < 2 else c0 + (c1 - c0) * rb.uniform(0.4, 0.8)
+            d.rounded_rectangle((c0, y, end, y + 11), radius=5, fill=(170, 165, 152, 255))
+    d.rectangle((600, 590, 601, 672), fill=(190, 185, 172, 255))
+    return im
+
+
+class Clip(Note):
+    """후킹 장면의 신문 스크랩: 화면 가운데 '탁' 붙었다가 도화지 오른쪽 위로 옮겨 붙는다."""
+    def __init__(self, cx, cy, w, h, rot, t0, items, fly_t, fly_dur, to_xy, to_scale, to_rot):
+        super().__init__(cx, cy, w, h, (0, 0, 0), rot, t0, items)
+        self.base = newsprint_surface(w, h)
+        self.fly_t, self.fly_dur = fly_t, fly_dur
+        self.to_xy, self.to_scale, self.to_rot = to_xy, to_scale, to_rot
+
+    def pose(self, t):
+        u = eio(prog(t, self.fly_t, self.fly_dur))
+        if u <= 0:
+            return 0.0, 0.0, 1.0, 0.0, 0.0
+        arc = -120 * math.sin(math.pi * u)        # 살짝 들렸다가 내려앉는 궤적
+        dx = (self.to_xy[0] - self.cx) * u
+        dy = (self.to_xy[1] - self.cy) * u + arc
+        sc = 1 + (self.to_scale - 1) * u
+        lift = math.sin(math.pi * u) if u < 1 else 0.0
+        return dx, dy, sc, (self.to_rot - self.rot) * u, lift
 
 
 # ---------------------------------------------------------------- scene
@@ -341,7 +429,7 @@ class Paper:
         self.settled = None
 
     def draw_base(self, t):
-        p = prog(t, 0.05, 0.6)
+        p = prog(t, -1.0, 0.6)            # 후킹을 위해 첫 프레임부터 도화지가 놓여 있음
         if p >= 1 and self.settled is not None:
             return self.settled.copy()
         world = Image.new('RGBA', (W, H), (255, 255, 255, 255))
@@ -375,30 +463,57 @@ class TapePiece:
 
 
 PAPER_OBJ = Paper()
-WORLD_ITEMS = [
-    TapePiece(0.62, PX0 + 35, PY0 + 25, 38), TapePiece(0.72, PX1 - 35, PY0 + 25, -38),
-    TapePiece(0.82, PX0 + 35, PY1 - 25, -38), TapePiece(0.92, PX1 - 35, PY1 - 25, 38),
+
+# ---- 후킹: 신문 스크랩
+FLY_T = S[1] - 0.12
+FLY_D = 0.75
+CW, CH = 1200, 700
+CLIP_TO = (2235, 430)
+CLIP_SCALE = 0.55
+_hx = 70
+_h1 = line_words([
+    (T(0, '삼'), '3년 새', 100, INK, BOLD, 'block'),
+    (T(0, '매출은'), '매출', 100, INK, BOLD, 'block')], _hx, 262, gap=0.25)
+for _w in _h1:
+    _w.block = INK
+_cnt = Counter(T(0, '십칠'), _hx - 8, 482, 180, 17, lambda v: f'+{v:.0f}%', color=RED, cdur=0.6)
+_cx_end = _hx - 8 + F(BOLD, 180).getlength('+17%')
+_q1 = Word(T(0, '손님은요'), '손님은', 700, 545, 104, INK, BOLD, 'pop')
+clip_items = _h1 + [
+    _cnt,
+    Tri(T(0, '늘었다'), _cx_end + 30, 410, 74, True, RED),
+    Word(T(0, '그런데'), '그런데,', 705, 395, 72, GRAY, BOLD, 'wipe'),
+    _q1,
+    Word(T(0, '손님은요') + 0.28, '?', 700 + _q1.width + 18, 560, 190, RED, BOLD, 'stamp'),
 ]
+CLIP = Clip(1440, 800, CW, CH, -1.5, 0.08, clip_items, FLY_T, FLY_D, CLIP_TO, CLIP_SCALE, 4.0)
+
+_tt = FLY_T + FLY_D - 0.05
+WORLD_ITEMS = [
+    TapePiece(_tt + 0.10, PX0 + 35, PY0 + 25, 38), TapePiece(_tt + 0.18, PX1 - 35, PY0 + 25, -38),
+    TapePiece(_tt + 0.26, PX0 + 35, PY1 - 25, -38), TapePiece(_tt + 0.34, PX1 - 35, PY1 - 25, 38),
+]
+OVERLAY_ITEMS = [TapePiece(_tt, CLIP_TO[0] + 10, CLIP_TO[1] - CH * CLIP_SCALE / 2 + 2, -3)]
 
 # 제목 (도화지 위)
-WORLD_ITEMS.append(Word(1.0, '9개 매장 · 2020–2026 실적 · 탐색적 데이터 분석', 338, 228, 40, (150, 150, 150, 255), REG, 'slide'))
+WORLD_ITEMS.append(Word(T(1, '피자') - 0.25, '9개 매장 · 2020–2026 실적 · 탐색적 데이터 분석', 338, 228, 40, (150, 150, 150, 255), REG, 'wipe', dur=0.6))
 WORLD_ITEMS += line_words([
-    (T(0, '피자'), '피자', 130, INK, BOLD, 'pop'),
-    (T(0, '매장'), '매장', 130, INK, BOLD, 'pop'),
-    (T(0, '아홉'), '9곳', 130, ORANGE, BOLD, 'stamp'),
-    (T(0, '육') - 0.15, '·', 130, (180, 180, 180, 255), BOLD, 'pop'),
-    (T(0, '육'), '6년', 130, ORANGE, BOLD, 'stamp'),
-    (T(0, '데이터'), '데이터', 130, INK, BOLD, 'pop'),
+    (T(1, '피자'), '피자', 130, INK, BOLD, 'pop'),
+    (T(1, '매장'), '매장', 130, INK, BOLD, 'pop'),
+    (T(1, '아홉'), '9곳', 130, ORANGE, BOLD, 'stamp'),
+    (T(1, '육') - 0.15, '·', 130, (180, 180, 180, 255), BOLD, 'pop'),
+    (T(1, '육'), '6년', 130, ORANGE, BOLD, 'stamp'),
+    (T(1, '데이터'), '데이터', 130, INK, BOLD, 'pop'),
 ], 330, 380, gap=0.22)
 _l2 = line_words([
-    (T(0, '핵심은'), '핵심은', 92, GRAY, REG, 'slide'),
-    (T(0, '딱'), '딱', 92, GRAY, REG, 'pop'),
-    (T(0, '세'), '3', 190, RED, BOLD, 'drop'),
-    (T(0, '가지입니다'), '가지', 92, GRAY, REG, 'pop'),
+    (T(1, '핵심은'), '핵심은', 92, GRAY, REG, 'wipe'),
+    (T(1, '핵심은') + 0.3, '딱', 92, GRAY, REG, 'pop'),
+    (T(1, '세'), '3', 190, RED, BOLD, 'drop'),
+    (T(1, '가지'), '가지', 92, GRAY, REG, 'pop'),
 ], 335, 590, gap=0.55)
 WORLD_ITEMS += _l2
 _three = _l2[2]
-WORLD_ITEMS.append(Marker(T(0, '가지입니다') + 0.15, 0.55,
+WORLD_ITEMS.append(Marker(T(1, '가지') + 0.15, 0.5,
                           ellipse_pts(_three.x + _three.width / 2, _three.y - 68, 88, 102, seed=1.3), 11, RED))
 
 # 포스트잇 공통
@@ -410,84 +525,84 @@ def label(t0, num, color):
     return Word(t0, num, P, 112, 54, color, BOLD, 'pop')
 
 # --- 01 노랑: 손님이 멈췄다
-t1 = S[1] - 0.05
+t1 = S[2] - 0.05
 y_c = (255, 226, 92)
 dark1 = (130, 100, 0, 255)
 n1_items = [label(t1 + 0.25, '01', dark1)]
-n1_items += [Word(T(1, '손님이'), '손님이', P, 250, 100, INK, BOLD, 'pop')]
-n1_items += chars(T(1, '멈췄습니다'), '멈췄다', P, 370, 100, INK, stagger=0.08)
-n1_items += [Word(T(1, '주문은'), '주문', P, 500, 60, GRAY, REG, 'slide'),
-             Tri(T(1, '줄었는데'), P + 190, 482, 46, False, RED),
-             Counter(T(1, '줄었는데'), P + 230, 505, 76, 1.4, lambda v: f'{v:.1f}%', color=RED),
-             Word(T(1, '단가만'), '단가', P, 615, 60, GRAY, REG, 'slide'),
-             Tri(T(1, '십구'), P + 190, 597, 46, True, TEAL),
-             Counter(T(1, '십구'), P + 230, 620, 76, 19, lambda v: f'{v:.0f}%', color=TEAL)]
-n1_items += [Marker(T(1, '올랐죠') - 0.1, 0.3, swoosh_pts(P + 225, P + 380, 645), 9, TEAL)]
+n1_items += [Word(T(2, '손님이'), '손님이', P, 250, 100, INK, BOLD, 'pop')]
+n1_items += chars(T(2, '멈췄습니다'), '멈췄다', P, 370, 100, INK, stagger=0.08)
+n1_items += [Word(T(2, '주문은'), '주문', P, 500, 60, GRAY, REG, 'wipe'),
+             Tri(T(2, '줄었는데'), P + 190, 482, 46, False, RED),
+             Counter(T(2, '줄었는데'), P + 230, 505, 76, 1.4, lambda v: f'{v:.1f}%', color=RED),
+             Word(T(2, '단가만'), '단가', P, 615, 60, GRAY, REG, 'wipe'),
+             Tri(T(2, '십구'), P + 190, 597, 46, True, TEAL),
+             Counter(T(2, '십구'), P + 230, 620, 76, 19, lambda v: f'{v:.0f}%', color=TEAL)]
+n1_items += [Marker(T(2, '올랐죠') - 0.1, 0.3, swoosh_pts(P + 225, P + 380, 645), 9, TEAL)]
 N1 = Note(640, NY, NS, NS, y_c, -3.0, t1, n1_items)
 
 # --- 02 분홍: 이익을 깎은 건 인건비
-t2 = S[2] - 0.05
+t2 = S[3] - 0.05
 p_c = (255, 178, 196)
 dark2 = (150, 40, 70, 255)
 n2_items = [label(t2 + 0.25, '02', dark2)]
 n2_items += line_words([
-    (T(2, '이익을'), '이익을', 68, INK, BOLD, 'pop'),
-    (T(2, '깎은'), '깎은', 68, INK, BOLD, 'pop'),
-    (T(2, '건'), '건', 68, INK, BOLD, 'pop')], P, 225, gap=0.25)
-n2_items += chars(T(2, '인건비입니다'), '인건비', P + 10, 415, 140, RED, stagger=0.09, style='drop')
-n2_items += [Marker(T(2, '인건비입니다') + 0.6, 0.5, ellipse_pts(P + 10 + 210, 360, 245, 78, seed=0.4), 9, INK)]
-n2_items += [Word(T(2, '인당'), '인당 인건비', P, 530, 58, GRAY, REG, 'slide'),
-             Tri(T(2, '이십팔'), P + 25, 610, 50, True, RED),
-             Counter(T(2, '이십팔'), P + 70, 640, 96, 28, lambda v: f'+{v:.0f}%', color=RED),
-             Marker(T(2, '뛰었습니다'), 0.35, swoosh_pts(P + 70, P + 310, 668), 10, RED)]
+    (T(3, '이익을'), '이익을', 68, INK, BOLD, 'pop'),
+    (T(3, '깎은'), '깎은', 68, INK, BOLD, 'pop'),
+    (T(3, '건'), '건', 68, INK, BOLD, 'pop')], P, 225, gap=0.25)
+n2_items += chars(T(3, '인건비입니다'), '인건비', P + 10, 415, 140, RED, stagger=0.09, style='drop')
+n2_items += [Marker(T(3, '인건비입니다') + 0.6, 0.5, ellipse_pts(P + 10 + 210, 360, 245, 78, seed=0.4), 9, INK)]
+n2_items += [Word(T(3, '인당'), '인당 인건비', P, 530, 58, GRAY, REG, 'wipe'),
+             Tri(T(3, '이십팔'), P + 25, 610, 50, True, RED),
+             Counter(T(3, '이십팔'), P + 70, 640, 96, 28, lambda v: f'+{v:.0f}%', color=RED),
+             Marker(T(3, '뛰었습니다'), 0.35, swoosh_pts(P + 70, P + 310, 668), 10, RED)]
 N2 = Note(1440, NY, NS, NS, p_c, 2.2, t2, n2_items)
 
 # --- 03 하늘: 처방은 매장마다
-t3 = S[3] - 0.05
+t3 = S[4] - 0.05
 b_c = (160, 214, 246)
 dark3 = (20, 70, 120, 255)
 n3_items = [label(t3 + 0.25, '03', dark3)]
-n3_items += [Word(T(3, '처방은'), '처방은', P, 220, 84, INK, BOLD, 'pop')]
+n3_items += [Word(T(4, '처방은'), '처방은', P, 220, 84, INK, BOLD, 'pop')]
 n3_items += line_words([
-    (T(3, '매장마다'), '매장마다', 64, INK, BOLD, 'pop'),
-    (T(3, '다릅니다'), '다르다', 64, INK, BOLD, 'stamp')], P, 315, gap=0.25)
-n3_items += [Word(T(3, '강남과'), '강남·홍대', P, 420, 50, GRAY, REG, 'slide')]
-n3_items += arrow(T(3, '임차료') - 0.3, P + 4, P + 80, 482, BLUE)
-n3_items += [Word(T(3, '임차료'), '임차료', P + 100, 505, 70, BLUE, BOLD, 'pop')]
-n3_items += [Word(T(3, '충장로와'), '충장로·연동', P, 585, 50, GRAY, REG, 'slide')]
-n3_items += arrow(T(3, '원가') - 0.3, P + 4, P + 80, 647, BLUE)
-n3_items += [Word(T(3, '원가'), '원가 관리', P + 100, 670, 70, BLUE, BOLD, 'pop')]
+    (T(4, '매장마다'), '매장마다', 64, INK, BOLD, 'pop'),
+    (T(4, '다릅니다'), '다르다', 64, INK, BOLD, 'stamp')], P, 315, gap=0.25)
+n3_items += [Word(T(4, '강남과'), '강남·홍대', P, 420, 50, GRAY, REG, 'wipe')]
+n3_items += arrow(T(4, '임차료') - 0.3, P + 4, P + 80, 482, BLUE)
+n3_items += [Word(T(4, '임차료'), '임차료', P + 100, 505, 70, BLUE, BOLD, 'pop')]
+n3_items += [Word(T(4, '충장로와'), '충장로·연동', P, 585, 50, GRAY, REG, 'wipe')]
+n3_items += arrow(T(4, '원가') - 0.3, P + 4, P + 80, 647, BLUE)
+n3_items += [Word(T(4, '원가'), '원가 관리', P + 100, 670, 70, BLUE, BOLD, 'pop')]
 N3 = Note(2240, NY, NS, NS + 40, b_c, -1.6, t3, n3_items)
 
 # --- 결론 띠지
-t4 = S[4] + 0.02
+t4 = S[5] + 0.02
 o_c = (255, 168, 76)
 SW, SH = 2050, 360
 s_items = [Word(t4 + 0.15, '결론', 70, 105, 58, (110, 55, 0, 255), BOLD, 'pop')]
 _s = line_words([
-    (T(4, '단가'), '단가', 120, (70, 40, 0, 255), BOLD, 'pop'),
-    (T(4, '말고'), '말고,', 120, (70, 40, 0, 255), BOLD, 'pop')], 70, 285, gap=0.2)
+    (T(5, '단가'), '단가', 120, (70, 40, 0, 255), BOLD, 'pop'),
+    (T(5, '말고'), '말고,', 120, (70, 40, 0, 255), BOLD, 'pop')], 70, 285, gap=0.2)
 s_items += _s
 _x = _s[-1].x + _s[-1].width + 50
-_cust = Word(T(4, '손님을'), '손님을', _x, 285, 160, (190, 15, 30, 255), BOLD, 'stamp')
-s_items += [Marker(T(4, '말고') + 0.15, 0.3, [(60, 245), (_s[0].x + _s[0].width + 12, 228)], 12, (190, 15, 30, 255)), _cust]
+_cust = Word(T(5, '손님을'), '손님을', _x, 285, 160, (190, 15, 30, 255), BOLD, 'stamp')
+s_items += [Marker(T(5, '말고') + 0.15, 0.3, [(60, 245), (_s[0].x + _s[0].width + 12, 228)], 12, (190, 15, 30, 255)), _cust]
 _x2 = _x + _cust.width + 40
 s_items += line_words([
-    (T(4, '늘려야'), '늘려야', 92, (70, 40, 0, 255), BOLD, 'pop'),
-    (T(4, '합니다'), '합니다.', 92, (70, 40, 0, 255), BOLD, 'pop')], _x2, 285, gap=0.2)
-s_items += [Marker(T(4, '늘려야') + 0.05, 0.4, swoosh_pts(_x - 5, _x + _cust.width + 5, 318, amp=8), 12, (190, 15, 30, 255))]
+    (T(5, '늘려야'), '늘려야', 92, (70, 40, 0, 255), BOLD, 'pop'),
+    (T(5, '합니다'), '합니다.', 92, (70, 40, 0, 255), BOLD, 'pop')], _x2, 285, gap=0.2)
+s_items += [Marker(T(5, '늘려야') + 0.05, 0.4, swoosh_pts(_x - 5, _x + _cust.width + 5, 318, amp=8), 12, (190, 15, 30, 255))]
 STRIP = Note(1440, 870, SW, SH, o_c, -3.0, t4, s_items)
 
-NOTES = [N1, N2, N3, STRIP]
+NOTES = [CLIP, N1, N2, N3, STRIP]
 
 # ---------------------------------------------------------------- camera
 KEYS = [
-    (0.0, 1440, 810, 1.00), (0.95, 1440, 810, 1.00),
-    (1.8, 1300, 560, 1.30), (S[1] - 0.5, 1330, 580, 1.36),
-    (S[1] + 0.15, 640, NY, 1.72), (S[2] - 0.5, 640, NY, 1.84),
-    (S[2] + 0.15, 1440, NY, 1.72), (S[3] - 0.5, 1440, NY, 1.84),
-    (S[3] + 0.15, 2240, NY, 1.68), (S[4] - 0.55, 2240, NY, 1.80),
-    (S[4] + 0.12, 1440, 810, 1.00), (DUR, 1440, 810, 1.07),
+    (0.0, 1440, 800, 1.50), (FLY_T, 1440, 800, 1.64),          # 후킹: 신문 스크랩 클로즈업
+    (FLY_T + FLY_D + 0.1, 1440, 640, 1.15), (S[2] - 0.3, 1440, 660, 1.20),
+    (S[2] + 0.3, 640, NY, 1.72), (S[3] - 0.5, 640, NY, 1.84),
+    (S[3] + 0.15, 1440, NY, 1.72), (S[4] - 0.5, 1440, NY, 1.84),
+    (S[4] + 0.15, 2240, NY, 1.68), (S[5] - 0.55, 2240, NY, 1.80),
+    (S[5] + 0.12, 1440, 810, 1.00), (DUR, 1440, 810, 1.07),
 ]
 SLAPS = [n.land_time() for n in NOTES]
 
@@ -502,6 +617,9 @@ def camera(t):
     cx = a[1] + (b[1] - a[1]) * u
     cy = a[2] + (b[2] - a[2]) * u
     z = math.exp(math.log(a[3]) + (math.log(b[3]) - math.log(a[3])) * u)
+    dq = t - T(0, '손님은요') - 0.28      # '손님은?' 순간 카메라 펀치 줌
+    if 0 <= dq < 0.9:
+        z *= 1 + 0.07 * (dq / 0.07 if dq < 0.07 else math.exp(-(dq - 0.07) / 0.3))
     for ts in SLAPS:                      # 붙일 때 살짝 흔들림
         d = t - ts
         if 0 <= d < 0.25:
@@ -520,6 +638,8 @@ def frame(t):
         it.draw(world, t)
     for n in NOTES:
         n.draw(world, t)
+    for it in OVERLAY_ITEMS:
+        it.draw(world, t)
     return world.resize((OW, OH), Image.BICUBIC, box=camera(t)).convert('RGB')
 
 
@@ -570,8 +690,20 @@ def build_audio(path):
         env = np.minimum(tt / 0.03, 1) * np.minimum((dur - tt) / 0.05, 1) * (0.55 + 0.45 * np.sin(2 * np.pi * 13 * tt))
         return band * env * 0.10
 
-    add(0.40, slap(0.30))                 # 도화지 내려놓기
-    for tp in WORLD_ITEMS:
+    def whoosh(dur, g):
+        n = int(dur * SR); tt = np.arange(n) / SR
+        w = rng.standard_normal(n).astype(np.float32)
+        env = np.sin(np.pi * tt / dur) ** 2
+        return (onepole(w, 0.08) * env * g).astype(np.float32)
+
+    def boom(g):                          # '손님은?' 강조 저음
+        n = int(0.5 * SR); tt = np.arange(n) / SR
+        f = 70 + 40 * np.exp(-tt / 0.05)
+        return (np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-tt / 0.18) * g).astype(np.float32)
+
+    add(FLY_T, whoosh(FLY_D, 0.9))
+    add(T(0, '손님은요') + 0.28, boom(0.35))
+    for tp in WORLD_ITEMS + OVERLAY_ITEMS:
         if isinstance(tp, TapePiece):
             add(tp.t0, tape())
     for n in NOTES:
